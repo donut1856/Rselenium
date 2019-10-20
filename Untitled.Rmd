@@ -1,0 +1,348 @@
+
+
+```{r}
+#loading required packages
+library(RSelenium)
+library(rvest)
+library(stringr)
+library(dplyr)
+library(tm)
+library(wordcloud2)
+library(RColorBrewer)
+library(topicmodels)
+library(ldatuning)
+library(qdap)
+library(data.table)
+```
+
+```{r}
+#Getting targeted page by Selenium
+driver = rsDriver(port = 6666L, browser = "firefox")
+
+remDr = driver$client
+
+remDr$navigate("https://millercenter.org/the-presidency/presidential-speeches")
+
+webElem = remDr$findElement(using = "css", "div.js-form-item:nth-child(43) > label:nth-child(2)")
+
+webElem$clickElement()
+
+
+for (i in 1:10){
+  remDr$executeScript("window.scrollTo(0, document.body.scrollHeight);")
+  Sys.sleep(2)
+}
+
+web.target = read_html(remDr$getPageSource()[[1]][1])
+
+```
+
+```{r}
+#Getting topics & dates of each speech 
+
+topics = web.target %>%
+  html_nodes("a") %>%
+  html_text() %>%
+  str_subset(":")
+
+date = NULL
+theme = NULL
+
+for (i in 1:50){
+date[i] = strsplit(topics, split = ":", fixed = T)[[i]][1]  
+}
+
+for (i in 1:50){
+theme[i] = strsplit(topics, split = ":", fixed = T)[[i]][2]  
+}
+
+trans = array(dim = 50)
+
+docs = data.frame(date, theme, trans)
+
+
+#Getting links of each speech
+links = web.target %>%
+  html_nodes("a") %>%
+  html_attr("href") %>%
+  str_subset("/the-presidency/") %>%
+  str_subset("-speeches/")
+
+links = paste("https://millercenter.org", links, sep = "")
+
+#Scraping transcripts from each speech
+
+
+for (i in 1:48){
+    docs[i, 3] = links[i] %>%
+    read_html() %>%
+    html_nodes("#dp-expandable-text p") %>%
+    html_text() %>%
+    paste(collapse = "")
+  print(paste("transcript fetched", i, sep = " "))
+}
+
+for (i in 49:50){
+    docs[i, 3] = links[i] %>%
+    read_html() %>%
+    html_nodes(".view-transcript p") %>%
+    html_text() %>%
+    paste(collapse = "")
+  print(paste("transcript fetched", i, sep = " "))
+}
+
+
+
+
+```
+
+```{r}
+for(i in (1:nrow(docs))){
+  #acronym
+  docs[i, 3] = gsub("can't", "can not ", docs[i, 3])
+  docs[i, 3] = gsub("cannot", " can not ", docs[i, 3])
+  docs[i, 3] = gsub("what's", " what is ", docs[i, 3])
+  docs[i, 3] = gsub("What's", " what is ", docs[i, 3])
+  docs[i, 3] = gsub("’ve ", " have ", docs[i, 3])
+  docs[i, 3] = gsub("n’t", " not ", docs[i, 3])
+  docs[i, 3] = gsub("i'm", " i am ", docs[i, 3])
+  docs[i, 3] = gsub("I'm", " i am ", docs[i, 3])
+  docs[i, 3] = gsub("’re", " are ", docs[i, 3])
+  docs[i, 3] = gsub("'d", " would ", docs[i, 3])
+  docs[i, 3] = gsub("'ll", " will", docs[i, 3])
+  #special character
+  docs[i, 3] = gsub("/", " ", docs[i, 3])
+  docs[i, 3] = gsub("[\r\n\t]", " ", docs[i, 3])
+  docs[i, 3] = gsub("[0-9]", " ", docs[i, 3])
+  docs[i, 3] = gsub("@", " ", docs[i, 3])
+  docs[i, 3] = gsub("-", " ", docs[i, 3])
+}
+```
+
+```{r}
+#Creating the text corpus
+trans = VCorpus(VectorSource(docs$trans))
+trans
+
+```
+
+
+```{r}
+
+
+#cleanning transcripts
+
+trans = tm_map(trans, tolower) %>%#converting all words to lower cases
+    tm_map(removePunctuation) %>% #removing all punctuations
+    tm_map(stripWhitespace) %>% #stripping all whitespaces
+    tm_map(removeNumbers) %>% #removing all numbers
+    tm_map(removeWords, stopwords("english")) %>% #removing english stopwords
+    tm_map(removeWords, c("applause", "can", "cant", "will", "that", "weve", "dont", "wont","youll", "youre")) #removing unnecessary words 
+
+
+
+```
+
+
+```{r}
+trans = tm_map(trans, PlainTextDocument)
+
+dtm = DocumentTermMatrix(trans)
+
+dim(dtm)
+```
+
+```{r}
+dtm = removeSparseTerms(dtm, 0.95)
+dim(dtm)
+```
+```{r}
+rownames(dtm) = docs$theme
+inspect(dtm[1:50, 1:5])
+```
+```{r}
+freq = colSums(as.matrix(dtm))
+ord = order(-freq)
+freq[head(ord)]
+freq[tail(ord)]
+```
+```{r}
+head(table(freq))
+tail(table(freq))
+```
+
+```{r}
+findFreqTerms(dtm, 250)
+```
+
+```{r}
+findAssocs(dtm, "health", corlimit = 0.85)
+```
+```{r}
+wordcloud(names(freq), freq, min.freq = 150, scale = c(3, 0.5), colors = brewer.pal(12, "Paired"))
+```
+
+```{r}
+freq = sort(colSums(as.matrix(dtm)), decreasing = T)
+wf = data.frame(word = names(freq), freq = freq)
+wordcloud2(wf, size = 0.5)
+
+
+```
+```{r}
+wf.first10 = wf[1:10, ]
+barplot(wf.first10$freq, names = wf.first10$word, main = "Top 10 Words", xlab = "Words", ylab = "Counts", las = 2)
+```
+```{r}
+set.seed(123)
+result <- FindTopicsNumber(
+  dtm,
+  topics = seq(2, 50, by = 1),
+  metrics = c("Griffiths2004", "CaoJuan2009", "Arun2010", "Deveaud2014"),
+  method = "Gibbs",
+  control = list(seed = 123),
+  mc.cores = 2L,
+  verbose = TRUE
+)
+
+FindTopicsNumber_plot(result)
+```
+```{r}
+
+lda8 = LDA(dtm, k = 8, method = "gibbs", control = list(seed = 123))
+
+topics(lda8)
+
+terms(lda8, 25)
+```
+```{r}
+speech10 = docs[39, 3]
+speech11 = docs[29, 3]
+speech12 = docs[22, 3]
+speech13 = docs[16, 3]
+speech14 = docs[8, 3]
+speech15 = docs[6, 3]
+speech16 = docs[3, 3]
+
+speech.pre = function(x){
+  x = iconv(x, "latin1", "ASCII", "") %>%
+    gsub("(Applause.)", "", .) %>%
+    qprep() %>%
+    replace_contraction() %>%
+    rm_stopwords(Top100Words, separate = F) %>%
+    strip(char.keep = c("?", ".")) 
+  x = data.frame(speech = x) %>%
+    sentSplit("speech")
+return(x)
+}
+
+sent10 = speech.pre(speech10)
+sent11 = speech.pre(speech11)
+sent12 = speech.pre(speech12)
+sent13 = speech.pre(speech13)
+sent14 = speech.pre(speech14)
+sent15 = speech.pre(speech15)
+sent16 = speech.pre(speech16)
+
+sent10$year = "2010"
+sent11$year = "2011"
+sent12$year = "2012"
+sent13$year = "2013"
+sent14$year = "2014"
+sent15$year = "2015"
+sent16$year = "2016"
+
+allsents = data.frame(rbind(sent10, sent11, sent12, sent13, sent14, sent15, sent16))
+
+
+```
+
+```{r}
+plot(freq_terms(allsents$speech))
+```
+
+```{r}
+wordmat = wfm(allsents$speech, allsents$year)
+head(wordmat[order(wordmat[, 1], wordmat[, 2], wordmat[, 3], wordmat[, 4], wordmat[, 5], wordmat[, 6], wordmat[, 7], decreasing = T), ])
+```
+
+```{r}
+trans_cloud(allsents$speech, allsents$year, min.freq = 5)
+```
+
+```{r}
+ws = word_stats(allsents$speech, allsents$year, rm.incomplete = T)
+plot(ws, label = T, lab.digits = 2)
+```
+
+
+```{r}
+assignInNamespace(
+  x = "hash_lookup_helper",
+  value = function(terms, key, missing = NA) {
+    
+    terms <- data.frame(x=terms, stringsAsFactors = FALSE)
+    setDT(terms)
+    
+    out <- data.table::as.data.table(key)[terms][[2]]
+    
+    if (!is.null(missing) && is.na(missing)) return(out)
+    if (!is.null(missing) && !is.na(missing)) {
+      hits <- which(is.na(out))
+      out[hits] <- missing
+      return(out)
+    }
+    
+    if (is.null(missing)) {
+      hits <- which(is.na(out))
+      out[hits] <- terms[[1]][hits]
+      return(out)
+    }
+    
+  },
+  ns = "qdapTools"
+)
+```
+
+```{r}
+pol = polarity(allsents$speech, allsents$year)
+pol
+```
+```{r}
+plot(pol)
+```
+
+```{r}
+pol.df = pol$all
+which.min(pol.df$polarity)
+which.max(pol.df$polarity)
+```
+
+```{r}
+pol.df$text.var[1115]
+pol.df$text.var[1454]
+```
+```{r}
+ari = automated_readability_index(allsents$speech, allsents$year)
+
+ari$Readability
+```
+
+```{r}
+form = formality(allsents$speech, allsents$year)
+form$form.prop.by
+```
+
+```{r}
+div = diversity(allsents$speech, allsents$year)
+div
+```
+
+```{r}
+plot(div)
+```
+
+```{r}
+dispersion_plot(allsents$speech, rm.vars = allsents$year, c("security", "economy", "jobs", "world"))
+```
+
